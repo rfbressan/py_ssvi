@@ -1,10 +1,8 @@
 # Port (attempt) from R code to compute SVI
 
 import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
 from math import pi
-from scipy.integrate import quad
+import scipy.optimize as sop
 
 
 def raw_svi(par, k):
@@ -109,54 +107,58 @@ def rmse(w, k, param):
     @param w: Market total variance
     @param k: Moneyness
     @param param: List of parameters (a, b, rho, m, sigma)
-    @return: A float number representing the rmse
+    @return: A float number representing the RMSE
     """
     return np.mean(np.sqrt((raw_svi(param, k)-w)**2))
 
 
-vol = pd.read_csv("iv.csv").filter(["period", "moneyness", "iv"])  # Select cols
-vol = vol[vol["period"] == 30]  # Subset rows where period = 30
-vol["tau"] = vol["period"] / 365  # Creates a new column named tau
-vol.rename(columns={"moneyness": "k"}, inplace=True)  # rename column to k
+def wrmse(w, k, param, weights):
+    """
+    Weighted RMSE
+    :param w: Market total variance
+    :param k: Moneyness
+    :param param: List of parameters (a, b, rho, m, sigma)
+    :param weights: Weights. Do not need to sum to 1
+    :return: A float number representing the weighted RMSE
+    """
+    sum_w = np.sum(weights)
+    return (1/sum_w) * np.mean(weights*(raw_svi(param, k)-w)**2)
 
 
-# Numerical example as in Jacquier
+def svi_fit_direct(k, w, weights, method, ngrid=5):
+    """
+    Direct procedure to calibrate a RAW SVI
+    :param k: Moneyness
+    :param w: Market total variance
+    :param weights: Weights. Do not need to sum to 1
+    :param method: Method of optimization. Currently implemented: "brute", "DE"
+    :param ngrid: Number of grid points for each parameter in brute force
+    algorithm
+    :return: SVI parameters (a, b, rho, m, sigma)
+    """
+    # Bounds on parameters
+    bounds = [(0., max(w)),
+               (0., 1.),
+               (-1., 1.),
+               (2*min(k), 2*max(k)),
+               (0., 1.)]
+    # Tuples for brute force
+    bfranges = tuple(bounds)
 
-a, b, rho, m, sigma = 0.030358, 0.0503815, -0.1, 0.3, 0.048922
-sviParams = [a, b, rho, m, sigma]
-sviParams2 = [a, b, rho, m, 3. * sigma]
-xx = np.linspace(-1., 1., 100)
+    # Objective function
+    def obj_fun(par):
+        sum_w = np.sum(weights)
+        return (1 / sum_w) * np.mean(weights * (raw_svi(par, k) - w) ** 2)
 
-# Testing rmse
-w = vol.iv * vol.iv * vol.tau
-print(rmse(w, vol.k, sviParams))
-
-impliedVar = np.sqrt(raw_svi(sviParams, xx))
-impliedVarpp = np.sqrt(raw_svi(sviParams2, xx))
-
-# Plot IVs
-plt.figure(figsize=(7, 3))  # make separate figure
-plt.plot(xx, impliedVar, 'b', linewidth=2, label="Standard SVI")
-plt.plot(xx, impliedVarpp, 'g', linewidth=2, label="$\sigma$ bumped up")
-plt.title("SVI implied volatility smile")
-plt.xlabel("log-moneyness", fontsize=12)
-plt.legend()
-plt.show()
-
-# Plot densities
-dens1 = density(sviParams, xx)
-dens2 = density(sviParams2, xx)
-zero = np.linspace(0.0, 0.0, 100)
-
-plt.figure(figsize=(7, 3))
-plt.plot(xx, zero, 'k', linewidth=1)
-plt.plot(xx, dens1, 'b', linewidth=2, label="Standard SVI")
-plt.plot(xx, dens2, 'g', linewidth=2, label="$\sigma$ bumped up")
-plt.title("Implied risk neutral densities")
-plt.xlabel("log-moneyness", fontsize=12)
-plt.legend()
-plt.show()
-
-# Check that density integrates to one
-print("Area under denstiy is:",
-      quad(lambda x: density(sviParams, x), xx[0], xx[-1])[0])
+    # Chooses algo and run
+    if method == "brute":
+        # Brute force algo. fmin will take place to refine solution
+        p0 = sop.brute(obj_fun, bfranges, Ns=ngrid, full_output=True)
+        return p0
+    elif method == "DE":
+        # Differential Evolution algo.
+        p0 = sop.differential_evolution(obj_fun, bounds)
+        return p0
+    else:
+        print("Unknown method passed to svi_fit_direct.")
+        raise
